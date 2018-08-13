@@ -105,8 +105,10 @@ typedef struct FuncScope {
 #define FSCOPE_GOLA		0x04	/* Goto or label used in scope. */
 #define FSCOPE_UPVAL		0x08	/* Upvalue in scope. */
 #define FSCOPE_NOCLOSE		0x10	/* Do not close upvalues. */
+#define FSCOPE_CONTINUE		0x20	/* AEDIT: Continue used in scope. */
 
 #define NAME_BREAK		((GCstr *)(uintptr_t)1)
+#define NAME_CONTINUE	((GCstr *)(uintptr_t)2) /* AEDIT: Continue label. */
 
 /* Index into variable stack. */
 typedef uint16_t VarIndex;
@@ -1224,14 +1226,21 @@ static void gola_fixup(LexState *ls, FuncScope *bl)
 	  }
       } else if (gola_isgoto(v)) {
 	if (bl->prev) {  /* Propagate goto or break to outer scope. */
-	  bl->prev->flags |= name == NAME_BREAK ? FSCOPE_BREAK : FSCOPE_GOLA;
+	  if (name == NAME_BREAK)
+		bl->prev->flags |= FSCOPE_BREAK;
+	  else if (name == NAME_CONTINUE)
+		bl->prev->flags |= FSCOPE_CONTINUE;
+	  else
+	    bl->prev->flags |= FSCOPE_GOLA;
 	  v->slot = bl->nactvar;
 	  if ((bl->flags & FSCOPE_UPVAL))
 	    gola_close(ls, v);
 	} else {  /* No outer scope: undefined goto label or no loop. */
 	  ls->linenumber = ls->fs->bcbase[v->startpc].line;
 	  if (name == NAME_BREAK)
-	    lj_lex_error(ls, 0, LJ_ERR_XBREAK);
+		lj_lex_error(ls, 0, LJ_ERR_XBREAK);
+	  else if (name == NAME_CONTINUE)
+		lj_lex_error(ls, 0, LJ_ERR_XCONTINUE);
 	  else
 	    lj_lex_error(ls, 0, LJ_ERR_XLUNDEF, strdata(name));
 	}
@@ -1275,6 +1284,16 @@ static void fscope_end(FuncState *fs)
   lua_assert(bl->nactvar == fs->nactvar);
   if ((bl->flags & (FSCOPE_UPVAL|FSCOPE_NOCLOSE)) == FSCOPE_UPVAL)
     bcemit_AJ(fs, BC_UCLO, bl->nactvar, 0);
+  if (bl->flags & FSCOPE_CONTINUE) { /* AEDIT: Create 'continue' label at the end of loop inner scopes. */
+    if (bl->prev && bl->prev->flags & FSCOPE_LOOP) {
+	  MSize idx = gola_new(ls, NAME_CONTINUE, VSTACK_LABEL, fs->pc);
+	  ls->vtop = idx;
+	  gola_resolve(ls, bl, idx);
+	} else {
+	  gola_fixup(ls, bl);
+	  return;
+	}
+  }
   if ((bl->flags & FSCOPE_BREAK)) {
     if ((bl->flags & FSCOPE_LOOP)) {
       MSize idx = gola_new(ls, NAME_BREAK, VSTACK_LABEL, fs->pc);
@@ -2377,6 +2396,13 @@ static void parse_break(LexState *ls)
   gola_new(ls, NAME_BREAK, VSTACK_GOTO, bcemit_jmp(ls->fs));
 }
 
+/* AEDIT: Parse 'continue' statement. */
+static void parse_continue(LexState *ls)
+{
+  ls->fs->bl->flags |= FSCOPE_CONTINUE;
+  gola_new(ls, NAME_CONTINUE, VSTACK_GOTO, bcemit_jmp(ls->fs));
+}
+
 /* Parse 'goto' statement. */
 static void parse_goto(LexState *ls)
 {
@@ -2688,6 +2714,10 @@ static int parse_stmt(LexState *ls)
     lj_lex_next(ls);
     break;
 #endif
+  case TK_continue: /* AEDIT: Parse continue statement. */
+	lj_lex_next(ls);
+	parse_continue(ls);
+	break;
   case TK_label:
     parse_label(ls);
     break;
